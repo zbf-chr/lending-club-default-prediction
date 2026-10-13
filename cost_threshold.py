@@ -289,6 +289,7 @@ def main() -> None:
     axes[1].grid(alpha=0.25)
 
     fig.suptitle("图 9｜成本敏感阈值：不取 0.5，取代价最小的那个点", fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
     FIG.parent.mkdir(exist_ok=True)
     fig.savefig(FIG)
     plt.close(fig)

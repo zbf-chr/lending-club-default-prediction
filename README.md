@@ -163,7 +163,10 @@ lending-club-project/
 ├── run_sql.py           # 执行 analysis.sql（DuckDB），结果存 sql_results.txt
 ├── cost_threshold.py    # 成本敏感阈值：不取 0.5，取代价最小的审批线
 ├── scorecard.py         # WOE + IV 评分卡（分箱 → 粗分类 → 去冗余 → LR → 评分表）
-├── figures/             # 11 张图
+├── clustering.py        # 借款人聚类分群（无监督，轮廓系数 vs 业务指标选 k）
+├── ab_test.py           # A/B 实验设计与显著性检验 + 统计功效分析
+├── psm.py               # 倾向得分匹配：期限对违约率的因果效应
+├── figures/             # 15 张图
 │   ├── 01_target_definition.png     标签口径与坏账率基线
 │   ├── 02_bad_rate_by_grade.png     评级 A→G 单调性验证
 │   ├── 03_bad_rate_by_fico_intrate.png
@@ -174,13 +177,20 @@ lending-club-project/
 │   ├── 08_missing_top.png           缺失语义
 │   ├── 09_cost_threshold.png        ★ 成本曲线与最优阈值
 │   ├── 10_scorecard_iv.png          特征 IV 排序
-│   └── 11_scorecard_score.png       ★ 评分十分位坏账率（单调性验证）
+│   ├── 11_scorecard_score.png       ★ 评分十分位坏账率（单调性验证）
+│   ├── 12_cluster_selection.png     ★ 轮廓系数会选错 k
+│   ├── 13_cluster_profile.png       ★ 分群画像与坏账率
+│   ├── 14_ab_test.png               显著性检验与功效曲线
+│   └── 15_psm.png                   ★ 倾向得分重叠 + Love plot
 ├── run_fixed.log        # 随机划分运行日志
 ├── run_leaky.log        # 含泄漏版运行日志
 ├── run_temporal.log     # 时间外验证运行日志
 ├── sql_results.txt      # SQL 全部查询结果（可复核）
 ├── cost_analysis.txt    # 成本阈值完整结果
 ├── scorecard.txt        # 评分卡完整表（含 WOE 明细）
+├── clustering.txt       # 分群画像与选 k 依据
+├── ab_test.txt          # 检验与功效分析完整结果
+├── psm.txt              # 匹配平衡性与 ATT 估计
 └── data/                # 数据集与缓存（不提交）
 ```
 
@@ -195,6 +205,9 @@ PY="D:/venvs/lending-club/Scripts/python.exe"
 "$PY" run_sql.py                     # 跑 analysis.sql → sql_results.txt
 "$PY" cost_threshold.py              # 成本敏感阈值 → cost_analysis.txt + 图 9
 "$PY" scorecard.py                   # WOE 评分卡 → scorecard.txt + 图 10/11
+"$PY" clustering.py                  # 聚类分群 → clustering.txt + 图 12/13
+"$PY" ab_test.py                     # A/B 实验与功效分析 → ab_test.txt + 图 14
+"$PY" psm.py                         # PSM 因果推断 → psm.txt + 图 15
 ```
 
 ### 实测结论速览
@@ -246,6 +259,55 @@ PY="D:/venvs/lending-club/Scripts/python.exe"
 > 入选变量：`sub_grade`(IV 0.449)、`term`(0.184)、`verification_status`(0.049)、
 > `home_ownership`(0.024)。评分十分位坏账率 **44.7% → 5.5% 完全单调**。
 > AUC 低 **0.0154**，换来的是每一项得分都能逐条拆给业务方 —— 可解释性的代价。
+
+**⑤ 聚类分群（clustering.txt）**
+
+| k | 轮廓系数 | 坏账率极差 |
+|---|---|---|
+| **2**（轮廓系数最优） | **0.1271** | 0.64pp ← 几何最优但没有业务区分度 |
+| **5**（业务指标选） | 0.0923 | **16.46pp** |
+
+> 这是全项目最反直觉的一个发现：**轮廓系数选出的 k=2 在业务上是废的**
+> （两群坏账率只差 0.64pp）。轮廓系数衡量的是**几何紧凑度，不是业务价值**。
+> 改用坏账率极差选 k=5，各群坏账率 **11.3% ~ 27.8%**，且 K-Means 与
+> 层次聚类(Ward) 独立跑出的跨度都在 15~16pp，结构稳定。
+> 交叉验证：低风险群 54% 落在最优评级 A，但**其余四群评级分布几乎一样**、
+> 坏账率却从 19.9% 拉到 27.8% —— 说明聚类捕捉到了**评级之外**的结构。
+
+**⑥ A/B 实验设计与显著性检验（ab_test.txt）**
+
+> ⚠️ 是**离线模拟实验**（随机对半分流），统计方法成立，但不等于真实线上 A/B。
+
+| | 对照组 A（阈值 0.500） | 实验组 B（阈值 0.143） |
+|---|---|---|
+| 通过率 | 97.0% | 34.9% |
+| 通过人群坏账率 | 20.35% | **8.86%** |
+
+> 双样本比例 z 检验：坏账率差 **+11.50pp，z = 11.97，p ≈ 0**（95% CI [+9.91, +13.09]）。
+> SRM 检查通过（分流比 0.9998，p = 0.99）。
+> **两个指标都显著但方向相反** —— 统计只能说"差异是真的"，"值不值得我们上"
+> 是业务决策。
+>
+> 功效分析：基线 20.35%、α=0.05、power=80% 下，检测 2pp 效应需每组 **6,125** 条；
+> 现有每组 6,055 条 → 可检测 MDE = **2.01pp**。实测差异 11.50pp 远大于 MDE，
+> 说明结论不是靠堆样本量堆出来的假显著。
+
+**⑦ PSM 倾向得分匹配（psm.txt）**
+
+因果问题：**「选 60 个月期限是不是导致违约率更高的原因？」**
+
+| | 估计值 |
+|---|---|
+| 朴素比较（未调整） | +17.80pp |
+| **PSM 匹配后（ATT）** | **+10.53pp**，bootstrap 95% CI [+9.03, +11.91] |
+
+> 匹配掉混淆后效应**缩小 41%** —— 说明朴素比较里的差异，很大一部分来自
+> "选长期限的人**本来**风险就高"，而不是期限本身。
+> 平衡性：20/40 个协变量不平衡 → **0/40**，平均 |SMD| 由 0.160 降至 0.013。
+> 卡钳 0.2×SD(logit PS)，1:1 无放回匹配，成功配对 7,423 对。
+>
+> ⚠️ PSM 只能控制**可观测**混淆；存在未观测混淆时仍有偏，属观察性研究证据，
+> 强度低于随机实验。
 
 > 完整数字卡片见 `简历与面经.md` 第五节。
 

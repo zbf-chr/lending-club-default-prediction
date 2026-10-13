@@ -32,3 +32,8 @@ Thumbs.db
 # ---------------------------------------------------------------------------
 eda.log
 sql.log
+clustering.log
+ab_test.log
+psm.log
+cost_threshold.log
+scorecard.log

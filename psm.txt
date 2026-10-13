@@ -1,0 +1,61 @@
+PSM 倾向得分匹配：60 个月期限是否导致更高违约率？
+
+处理组( 60 months) 14,850 条，坏账率 34.96%
+对照组( 36 months) 45,704 条，坏账率 17.16%
+协变量 40 个（含 one-hot），刻意排除 int_rate（由 grade 和 term 共同决定，是中介变量）、installment（月供是 term 和金额的直接函数）
+
+=== 效应估计 ===
+朴素比较（未调整）：+17.80pp
+PSM 匹配后（ATT）  ：+10.53pp，bootstrap 95% CI [+9.03pp, +11.91pp]
+效应缩小 41%
+
+=== 匹配 ===
+卡钳 0.2 × 2.1179 = 0.4236，成功配对 7,423 对
+匹配前 20/40 个协变量不平衡，匹配后 0/40 个
+平均 |SMD| 0.1604 → 0.0127
+
+=== 平衡性明细（按匹配前 |SMD| 降序）===
+                                协变量  匹配前|SMD|  匹配后|SMD|
+                          loan_amnt    1.1013    0.0313
+                            grade_B    0.4633    0.0124
+                            grade_E    0.4600    0.0405
+                            grade_F    0.3506    0.0446
+                    tot_hi_cred_lim    0.3497    0.0084
+                            grade_D    0.2897    0.0222
+                         annual_inc    0.2746    0.0139
+                          total_acc    0.2456    0.0047
+            home_ownership_MORTGAGE    0.2359    0.0032
+                           mort_acc    0.2203    0.0141
+                home_ownership_RENT    0.2194    0.0054
+       verification_status_Verified    0.2030    0.0059
+                            grade_G    0.1971    0.0415
+         purpose_debt_consolidation    0.1925    0.0142
+                           open_acc    0.1751    0.0033
+                      purpose_other    0.1397    0.0082
+                         revol_util    0.1338    0.0117
+                                dti    0.1289    0.0008
+                            grade_C    0.1153    0.0468
+                     emp_length_int    0.1125    0.0049
+                            bc_util    0.0985    0.0021
+                   purpose_vacation    0.0924    0.0120
+                purpose_credit_card    0.0799    0.0170
+                 credit_hist_months    0.0774    0.0001
+verification_status_Source Verified    0.0754    0.0030
+                     purpose_moving    0.0697    0.0145
+                    purpose_medical    0.0649    0.0029
+                     inq_last_6mths    0.0575    0.0034
+             purpose_major_purchase    0.0430    0.0050
+                 home_ownership_OWN    0.0368    0.0151
+             purpose_small_business    0.0284    0.0354
+           purpose_renewable_energy    0.0223    0.0268
+                        delinq_2yrs    0.0160    0.0039
+                home_ownership_NONE    0.0148    0.0000
+                purpose_educational    0.0098    0.0000
+                     fico_range_low    0.0081    0.0071
+                    purpose_wedding    0.0063    0.0034
+           purpose_home_improvement    0.0043    0.0122
+                      purpose_house    0.0017    0.0049
+               home_ownership_OTHER    0.0003    0.0000
+
+注：PSM 只能控制【可观测】混淆。若存在未观测混淆，本估计仍有偏。
+    因此这是观察性研究证据，强度低于随机实验(RCT)。
