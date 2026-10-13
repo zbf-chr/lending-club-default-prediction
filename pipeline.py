@@ -76,6 +76,10 @@ SAMPLE_N = 100_000          # 原版也抽样 10 万行；全量 220 万行你�
 K_FEATURES = 20             # 折内选多少个特征
 N_SPLITS = 5                # 交叉验证折数
 
+# 原始抽样数据的缓存。**与 eda.py 共用同一份** —— 两个脚本必须看到完全相同的样本，
+# 否则 EDA 报的坏账率会和模型的对不上，口径就崩了。
+CACHE_PATH = Path(__file__).parent / "data" / "_cache_raw_sample.pkl"
+
 # ---------------------------------------------------------------------------
 # 一、业务定义：什么算"坏账"
 # ---------------------------------------------------------------------------
@@ -328,7 +332,13 @@ def resolve_data_path(explicit: str | None = None) -> Path:
         + "\n或用 --data 显式指定路径，也可以先用 --smoke 跑通流程。")
 
 
-def load_real_data(path: Path) -> pd.DataFrame:
+def load_real_data(path: Path, use_cache: bool = True) -> pd.DataFrame:
+    """读原始数据 + 抽样。第一次读 374MB 压缩包要 2 分多钟，之后走 pickle 缓存。"""
+    if use_cache and CACHE_PATH.exists():
+        df = pd.read_pickle(CACHE_PATH)
+        print(f"[加载] 命中缓存 {CACHE_PATH.name}：{len(df):,} 行 × {df.shape[1]} 列")
+        return df
+
     keep = set(RAW_COLS)
     # 只读需要的列，否则 2.2M 行 × 151 列会把内存打满
     df = pd.read_csv(path, usecols=lambda c: c in keep, low_memory=False)
@@ -336,6 +346,11 @@ def load_real_data(path: Path) -> pd.DataFrame:
     if len(df) > SAMPLE_N:
         df = df.sample(n=SAMPLE_N, random_state=SEED).reset_index(drop=True)
         print(f"[加载] 抽样至 {len(df):,} 行（random_state={SEED}）")
+
+    if use_cache:
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        df.to_pickle(CACHE_PATH)
+        print(f"[加载] 已缓存到 {CACHE_PATH.name}")
     return df
 
 
@@ -523,18 +538,36 @@ def main() -> None:
                         help="不平衡处理方式（默认 classweight，原版用的是 undersample）")
     parser.add_argument("--data", default=None,
                         help="数据集路径（.csv 或 .csv.gz 都行），不填则自动查找")
+    parser.add_argument("--split", choices=["random", "temporal"], default="random",
+                        help="划分方式：random=分层随机划分（默认）；"
+                             "temporal=时间外验证，用历史训练、预测未来")
+    parser.add_argument("--cutoff", type=int, default=2015,
+                        help="时间外验证的分界年份（默认 2015）")
+    parser.add_argument("--refresh", action="store_true",
+                        help="忽略 pickle 缓存，重新读原始 CSV")
     args = parser.parse_args()
 
     mode = "原版口径(含泄漏)" if args.leaky else "修正版(无泄漏)"
-    print(f"\n{'=' * 60}\n运行模式：{mode}\n{'=' * 60}\n")
+    split_name = ("时间外验证(<%d 训练)" % args.cutoff) if args.split == "temporal" \
+                 else "随机划分(8:2)"
+    print(f"\n{'=' * 60}\n运行模式：{mode}｜{split_name}\n{'=' * 60}\n")
 
     # ---------- 数据 ----------
-    df = make_synthetic_data() if args.smoke else load_real_data(resolve_data_path(args.data))
+    df = (make_synthetic_data() if args.smoke
+          else load_real_data(resolve_data_path(args.data),
+                              use_cache=not args.refresh))
     df = clean(df, leaky=args.leaky)
 
     X = df.drop(columns=["bad_loan"])
     y = df["bad_loan"].reset_index(drop=True)
     X = X.reset_index(drop=True)
+
+    # 时间外验证：issue_year 本身不能当特征 —— 训练集里只有 <=2014 的取值，
+    # 测试集全是 >=2015，树模型只会把它当成训练时没见过的外推点。
+    # 必须在这里摘掉（而不是划分时），否则下面 num_cols 会包含一个已删除的列。
+    issue_year = (X.pop("issue_year")
+                  if args.split == "temporal" and "issue_year" in X.columns
+                  else None)
     # pandas 3.0 起字符串列的 dtype 是 `str` 而非 `object`，用 is_numeric_dtype 判断
     num_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
     cat_cols = [c for c in X.columns if c not in num_cols]
@@ -542,13 +575,30 @@ def main() -> None:
 
     assert_no_leakage(X, y)
 
-    # ---------- 划分：留存集保持真实先验 ----------
-    splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=SEED)
-    tr_idx, te_idx = next(splitter.split(X, y))
+    # ---------- 划分 ----------
+    if args.split == "temporal":
+        # 时间外验证：模拟真实上线场景 —— 用历史数据训练，去预测【未来发放】的贷款。
+        if issue_year is None:
+            raise SystemExit("[错误] 时间外验证需要 issue_year 字段，"
+                             "请用真实数据（--smoke 的合成数据没有时间结构）")
+        tr_idx = np.where(issue_year.values < args.cutoff)[0]
+        te_idx = np.where(issue_year.values >= args.cutoff)[0]
+        # 划分后样本太少就直接报错退出，别让它崩在 sklearn 里（很难看懂）
+        if len(tr_idx) < 500 or len(te_idx) < 500:
+            raise SystemExit(
+                f"[错误] 时间外验证划分后样本太少：训练 {len(tr_idx):,} / "
+                f"测试 {len(te_idx):,}。请检查 --cutoff={args.cutoff} 是否合理；"
+                "合成数据（--smoke）的年份都造在 2015 之后，用不了时间外验证。")
+        print(f"[划分] 时间外验证：训练 = issue_year < {args.cutoff}，"
+              f"测试 = issue_year >= {args.cutoff}（已剔除 issue_year 特征）")
+    else:
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=SEED)
+        tr_idx, te_idx = next(splitter.split(X, y))
+
     X_tr, X_te = X.iloc[tr_idx].reset_index(drop=True), X.iloc[te_idx].reset_index(drop=True)
     y_tr, y_te = y.iloc[tr_idx].reset_index(drop=True), y.iloc[te_idx].reset_index(drop=True)
     print(f"[划分] 训练 {len(X_tr):,} / 留存 {len(X_te):,}，"
-          f"留存集坏账率 {y_te.mean():.2%}")
+          f"训练集坏账率 {y_tr.mean():.2%}，留存集坏账率 {y_te.mean():.2%}")
 
     # ---------- 交叉验证 ----------
     models = build_models()
@@ -595,9 +645,14 @@ def main() -> None:
     result = pd.DataFrame(holdout).T.sort_values("AUC", ascending=False)
     print(f"\n[留存集结果 · {mode}]")
     print(result.round(4).to_string())
-    nxt = "" if args.leaky else "--leaky"
-    print(f"\n[对比提示] 记下这里的 AUC，再跑一次 `python pipeline.py {nxt}` "
-          "对比两者差距 —— 这个差值就是【泄漏带来的虚假提升】。")
+    if args.split == "temporal":
+        print(f"\n[对比提示] 这是【时间外】的分数，更接近上线后的真实表现。"
+              f"再跑一次 `python pipeline.py`（随机划分）对比 —— "
+              "两者之差就是【随机划分高估的幅度】。")
+    else:
+        nxt = "" if args.leaky else "--leaky"
+        print(f"\n[对比提示] 记下这里的 AUC，再跑一次 `python pipeline.py {nxt}` "
+              "对比两者差距 —— 这个差值就是【泄漏带来的虚假提升】。")
     print("\n选中的特征：", keep)
 
 

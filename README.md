@@ -157,11 +157,13 @@ lending-club-project/
 ├── README.md            # 本文件（项目说明）
 ├── 简历与面经.md         # 简历条目（DA 版 / 建模版）+ 高频面试题与答法
 ├── requirements.txt
-├── pipeline.py          # 建模流水线（主交付物）
+├── pipeline.py          # 建模流水线（主交付物），支持 --leaky / --split temporal
 ├── eda.py               # EDA 可视化，输出 8 张业务图
 ├── analysis.sql         # 核心指标的 SQL 实现（8 组查询）
 ├── run_sql.py           # 执行 analysis.sql（DuckDB），结果存 sql_results.txt
-├── figures/             # 8 张业务洞察图
+├── cost_threshold.py    # 成本敏感阈值：不取 0.5，取代价最小的审批线
+├── scorecard.py         # WOE + IV 评分卡（分箱 → 粗分类 → 去冗余 → LR → 评分表）
+├── figures/             # 11 张图
 │   ├── 01_target_definition.png     标签口径与坏账率基线
 │   ├── 02_bad_rate_by_grade.png     评级 A→G 单调性验证
 │   ├── 03_bad_rate_by_fico_intrate.png
@@ -169,10 +171,16 @@ lending-club-project/
 │   ├── 05_bad_rate_by_region_year.png
 │   ├── 06_bad_rate_by_dti_income.png
 │   ├── 07_corr_with_target.png      ★ 时间泄漏的证据
-│   └── 08_missing_top.png           缺失语义
-├── run_fixed.log        # 修正版运行日志
+│   ├── 08_missing_top.png           缺失语义
+│   ├── 09_cost_threshold.png        ★ 成本曲线与最优阈值
+│   ├── 10_scorecard_iv.png          特征 IV 排序
+│   └── 11_scorecard_score.png       ★ 评分十分位坏账率（单调性验证）
+├── run_fixed.log        # 随机划分运行日志
 ├── run_leaky.log        # 含泄漏版运行日志
+├── run_temporal.log     # 时间外验证运行日志
 ├── sql_results.txt      # SQL 全部查询结果（可复核）
+├── cost_analysis.txt    # 成本阈值完整结果
+├── scorecard.txt        # 评分卡完整表（含 WOE 明细）
 └── data/                # 数据集与缓存（不提交）
 ```
 
@@ -180,13 +188,18 @@ lending-club-project/
 
 ```bash
 PY="D:/venvs/lending-club/Scripts/python.exe"
-"$PY" pipeline.py            # 修正版建模 → 对比 run_fixed.log
-"$PY" pipeline.py --leaky    # 含泄漏版 → 对比 run_leaky.log
-"$PY" eda.py                 # 生成 figures/ 下 8 张图
-"$PY" run_sql.py             # 跑 analysis.sql → sql_results.txt
+"$PY" pipeline.py                    # 修正版建模 → run_fixed.log
+"$PY" pipeline.py --leaky            # 含泄漏版 → run_leaky.log
+"$PY" pipeline.py --split temporal   # 时间外验证 → run_temporal.log
+"$PY" eda.py                         # 生成 figures/01-08
+"$PY" run_sql.py                     # 跑 analysis.sql → sql_results.txt
+"$PY" cost_threshold.py              # 成本敏感阈值 → cost_analysis.txt + 图 9
+"$PY" scorecard.py                   # WOE 评分卡 → scorecard.txt + 图 10/11
 ```
 
 ### 实测结论速览
+
+**① 时间泄漏（run_fixed.log vs run_leaky.log）**
 
 | 指标 | 修正版（无泄漏） | 含泄漏版 |
 |---|---|---|
@@ -195,6 +208,45 @@ PY="D:/venvs/lending-club/Scripts/python.exe"
 | PR-AUC | **0.4008** | 0.9990 |
 
 > 差值 **0.286** 即时间泄漏造成的虚假提升。
+
+**② 时间外验证（run_temporal.log）**
+
+用 2014 年及以前训练、2015 年及以后测试（剔除 `issue_year` 特征）：
+
+| 划分方式 | 训练集坏账率 | 测试集坏账率 | GBDT AUC |
+|---|---|---|---|
+| 随机划分 8:2 | 21.52% | 21.53% | **0.7139** |
+| 时间外（< 2015） | 17.49% | 23.51% | **0.7053** |
+
+> 随机划分高估约 **0.0086**。幅度不大，但方向是对的 —— 而且它暴露了更重要的
+> 事实：**训练集 17.5% vs 测试集 23.5%**，坏账率本身随时间漂移，
+> 随机划分会假装两个时期同分布。
+
+**③ 成本敏感审批阈值（cost_analysis.txt）**
+
+代价比 FN:FP = 6:1（LGD 60% vs 净利润率 10%）时：
+
+| 审批阈值 | 期望总成本 | 通过率 | 拦截坏账 |
+|---|---|---|---|
+| 默认 0.500 | 22.40 百万 | 96.9% | 8.5% |
+| **理论 fp/(fp+fn) = 0.143** | **11.04 百万** | 35.8% | **85.1%** |
+| 实测扫描最优点 0.140 | 10.98 百万 | 34.0% | 86.5% |
+
+> 理论解与实测最优点只差 **0.003** —— 这反过来证明模型概率是**校准可信**的
+> （预测概率均值 21.48% vs 实际坏账率 21.53%）。
+> 默认 0.5 几乎是最差的选择，比最优解贵一倍。
+
+**④ WOE + IV 评分卡（scorecard.txt）**
+
+| 模型 | AUC | PR-AUC | KS |
+|---|---|---|---|
+| 评分卡（4 变量 WOE + LR） | 0.6979 | 0.3690 | 0.3006 |
+| 梯度提升（GBDT） | 0.7133 | 0.3981 | 0.3180 |
+
+> 入选变量：`sub_grade`(IV 0.449)、`term`(0.184)、`verification_status`(0.049)、
+> `home_ownership`(0.024)。评分十分位坏账率 **44.7% → 5.5% 完全单调**。
+> AUC 低 **0.0154**，换来的是每一项得分都能逐条拆给业务方 —— 可解释性的代价。
+
 > 完整数字卡片见 `简历与面经.md` 第五节。
 
 ---
